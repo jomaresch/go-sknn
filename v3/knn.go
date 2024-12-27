@@ -27,17 +27,16 @@ func NewKNN[T any](precision int) (*KNN[T], error) {
 		return nil, fmt.Errorf("invalid precision %d: precision must be between %d and %d", precision, MinPrecision, MaxPrecision)
 	}
 	return &KNN[T]{
-		indexRoot:   &Node[T]{},
-		lookup:      make(map[string]*Node[T]),
-		precision:   precision,
-		lookupMutex: sync.RWMutex{},
-		pruneMutex:  sync.RWMutex{},
+		indexRoot: &Node[T]{},
+		lookup:    make(map[string]*Node[T]),
+		precision: precision,
 	}, nil
 }
 
 // AddValue adds a new value to the search tree.
 // The function will panic if the latitude or longitude are out of bounds.
 func (a *KNN[T]) AddValue(id string, value T, lat float64, long float64) {
+	// The pruneMutex is used to prevent pruning while adding a new value.
 	a.pruneMutex.RLock()
 	defer a.pruneMutex.RUnlock()
 
@@ -55,12 +54,15 @@ func (a *KNN[T]) AddValue(id string, value T, lat float64, long float64) {
 	node.SetValue(id, value, cellID)
 	// Add the node to the lookup map.
 	a.lookupMutex.Lock()
-	defer a.lookupMutex.Unlock()
 	a.lookup[id] = node
+	a.lookupMutex.Unlock()
 }
 
 // RemoveValue removes a value from the search tree.
+// The function will return false if the value was not found and true if the value
+// was removed successfully.
 func (a *KNN[T]) RemoveValue(id string) bool {
+	// The pruneMutex is used to prevent pruning while removing a value.
 	a.pruneMutex.RLock()
 	defer a.pruneMutex.RUnlock()
 
@@ -71,96 +73,87 @@ func (a *KNN[T]) RemoveValue(id string) bool {
 	if !ok {
 		return false
 	}
-
+	// Remove the value from the search index.
 	node.RemoveValue(id)
+	// Remove the value from the lookup map.
 	delete(a.lookup, id)
 	return true
 }
 
-// UpdateValue updates a value in the search tree.
+// UpsertValue updates a value in the search tree or inserts the value if it does not exist.
 // The function will panic if the latitude or longitude are out of bounds.
-func (a *KNN[T]) UpdateValue(id string, value T, lat float64, long float64) {
+func (a *KNN[T]) UpsertValue(id string, value T, lat float64, long float64) {
+	// The pruneMutex is used to prevent pruning while updating a value.
 	a.pruneMutex.RLock()
 	defer a.pruneMutex.Unlock()
 
+	// Check if we have to update or insert the value.
 	cellID := s2.CellIDFromLatLng(s2.LatLngFromDegrees(lat, long))
 	a.lookupMutex.RLock()
 	node, ok := a.lookup[id]
 	a.lookupMutex.Unlock()
+
+	// If the value does not exist, we add it.
 	if !ok {
 		a.AddValue(id, value, lat, long)
 		return
 	}
+	// If the value exists, we update it.
+	// If the cell is the same, we just have to update the value in the node.
+	// This avoids removing and adding the valid from the node, which is more expensive.
 	if node.cellID == cellID {
 		node.SetValue(id, value, cellID)
 		return
 	}
+	// If the cell has changed, the only way to update the value is to remove it and add it again.
 	a.RemoveValue(id)
 	a.AddValue(id, value, lat, long)
 }
 
+// SearchApproximate performs an approximate nearest neighbor search in the K-Nearest Neighbors (KNN) index.
+// It searches for values in the tree that are closest to a given latitude and longitude.
+// The callback function is called for each value found, and the search stops if the callback returns true or if the context is canceled.
+//
+// The found values are not guaranteed to be ordered perfectly by distance.
+// It has an error margin which is defines by the precision of the KNN.
+// A higher precision will result in a more accurate search but will be slower and consume more memory.
 func (a *KNN[T]) SearchApproximate(ctx context.Context, lat float64, long float64, callback func(*Value[T]) bool) {
 	a.pruneMutex.RLock()
 	defer a.pruneMutex.RUnlock()
-	// Define the search location as a S2 point.
 	point := s2.PointFromLatLng(s2.LatLngFromDegrees(lat, long))
-	// Create a new priority queue, where the lowest value is always at the root.
-	// This way we can assure, that we always pop the node with the shortest
-	// distance to the search location
 	priorityQueue := lane.NewMinPriorityQueue[*Node[T], float64]()
-	// Add the root of the index to the queue.
 	priorityQueue.Push(a.indexRoot, 0)
 	for {
-		// Check for a canceled context.
 		if ctx.Err() != nil {
 			return
 		}
-		// Pop one node from the queue. Since the queue is a priority queue,
-		// this node always has the shortest distance to the search location.
 		poppedNode, _, ok := priorityQueue.Pop()
-		// Not ok means that the queue is empty and we can return the results.
 		if !ok {
 			return
 		}
-		// If the node is a leave node, we can iterate of the values and filter them.
-		// Due to the nature of the priority queue, this leave node has the shortest
-		// distance off all nodes to the search location. Since this search is just an
-		// approximate nearest neighbour search, we assume that all items in this node
-		// have roughly the same distance to the search location.
 		if poppedNode.IsLeaveNode() {
-			// Filter the values and add the to the result slice.
 			if poppedNode.FilerValues(callback) {
 				return
 			}
 		} else {
-			// Calculate the distance to all children nodes and add them to the queue.
-			// The queue will sort the children nodes, together with the other nodes,
-			// by distance to the search location.
 			poppedNode.AddChildrenToQueue(point, priorityQueue.Push)
 		}
 	}
 }
 
+// Search performs an exact nearest neighbor search in the K-Nearest Neighbors (KNN) index.
+// It has the same specification as SearchApproximate, but the values are guaranteed to be ordered by distance.
 func (a *KNN[T]) Search(ctx context.Context, lat float64, long float64, callback func(*Value[T]) bool) {
 	a.pruneMutex.RLock()
 	defer a.pruneMutex.RUnlock()
-	// Define the search location as a S2 point.
 	point := s2.PointFromLatLng(s2.LatLngFromDegrees(lat, long))
-	// Create a new priority queue, where the lowest value is always at the root.
-	// This way we can assure, that we always pop the node with the shortest
-	// distance to the search location
 	priorityQueue := lane.NewMinPriorityQueue[interface{}, float64]()
-	// Add the root of the index to the queue.
 	priorityQueue.Push(a.indexRoot, 0)
 	for {
-		// Check for a canceled context.
 		if ctx.Err() != nil {
 			return
 		}
-		// Pop one node from the queue. Since the queue is a priority queue,
-		// this node always has the shortest distance to the search location.
 		poppedNode, _, ok := priorityQueue.Pop()
-		// Not ok means that the queue is empty and we can return the results.
 		if !ok {
 			return
 		}
@@ -179,6 +172,7 @@ func (a *KNN[T]) Search(ctx context.Context, lat float64, long float64, callback
 	}
 }
 
+// Prune removes all nodes without values from the search tree.
 func (a *KNN[T]) Prune() {
 	a.pruneMutex.Lock()
 	defer a.pruneMutex.Unlock()
