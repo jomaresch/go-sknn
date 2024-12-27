@@ -1,3 +1,3 @@
-@phony: test
+@phony: examples
 test:
 	go test -v ./...

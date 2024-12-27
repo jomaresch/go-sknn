@@ -1,7 +1,6 @@
-package v2
+package go_sknn
 
 import (
-	"context"
 	"sync"
 
 	"github.com/golang/geo/s2"
@@ -9,7 +8,7 @@ import (
 
 type Node[T any] struct {
 	cellID      s2.CellID
-	values      map[string]T
+	values      []*Value[T]
 	children    []*Node[T]
 	isLeaveNode bool
 	parent      *Node[T]
@@ -28,7 +27,6 @@ func (n *Node[T]) ValuesCount() []int {
 	return result
 }
 
-// GetOrCreateChild ✅
 func (n *Node[T]) GetOrCreateChild(key s2.CellID, isLeaveNode bool) *Node[T] {
 	n.childMutex.RLock()
 	for _, child := range n.children {
@@ -49,17 +47,17 @@ func (n *Node[T]) GetOrCreateChild(key s2.CellID, isLeaveNode bool) *Node[T] {
 
 	child := &Node[T]{
 		cellID:      key,
-		values:      make(map[string]T),
-		children:    []*Node[T]{},
+		values:      []*Value[T]{},
+		children:    make([]*Node[T], 0, 1),
 		isLeaveNode: isLeaveNode,
 		parent:      n,
 		childMutex:  sync.RWMutex{},
+		valuesMutex: sync.RWMutex{},
 	}
 	n.children = append(n.children, child)
 	return child
 }
 
-// AddChildrenToQueue ✅
 func (n *Node[T]) AddChildrenToQueue(point s2.Point, addFunction func(*Node[T], float64)) {
 	n.childMutex.RLock()
 	defer n.childMutex.RUnlock()
@@ -68,43 +66,59 @@ func (n *Node[T]) AddChildrenToQueue(point s2.Point, addFunction func(*Node[T], 
 	}
 }
 
-// FilerValues ✅
-func (n *Node[T]) FilerValues(ctx context.Context, results []T, distance float64, filter FilterFunc[T]) ([]T, bool) {
+func (n *Node[T]) AddChildrenToQueueInterface(point s2.Point, addFunction func(interface{}, float64)) {
+	n.childMutex.RLock()
+	defer n.childMutex.RUnlock()
+	for _, child := range n.children {
+		addFunction(child, float64(s2.CellFromCellID(child.cellID).Distance(point)))
+	}
+}
+
+func (n *Node[T]) AddValuesToQueue(point s2.Point, addFunction func(interface{}, float64)) {
+	n.valuesMutex.RLock()
+	defer n.valuesMutex.RUnlock()
+	for _, value := range n.values {
+		addFunction(value, float64(s2.CellFromCellID(value.cell).Distance(point)))
+	}
+}
+
+func (n *Node[T]) FilerValues(callback func(*Value[T]) bool) bool {
 	n.valuesMutex.RLock()
 	defer n.valuesMutex.RUnlock()
 
 	for _, value := range n.values {
-		switch filter(ctx, distance, value, results) {
-		case FilterType_Continue:
-			results = append(results, value)
-		case FilterType_Stop:
-			return results, true
-		case FilterType_Skip:
-			continue
-		default:
-			panic("unknown filter type")
+		if callback(value) {
+			return true
 		}
 	}
 
-	return results, false
+	return false
 }
 
-// SetValue ✅
-func (n *Node[T]) SetValue(key string, value T) {
+func (n *Node[T]) SetValue(key string, value T, cell s2.CellID) {
 	n.valuesMutex.Lock()
 	defer n.valuesMutex.Unlock()
-	n.values[key] = value
+	n.values = append(n.values, &Value[T]{key: key, value: value, cell: cell})
 }
 
 func (n *Node[T]) IsLeaveNode() bool {
 	return n.isLeaveNode
 }
 
-// RemoveValue ✅
 func (n *Node[T]) RemoveValue(key string) bool {
 	n.valuesMutex.Lock()
 	defer n.valuesMutex.Unlock()
-	delete(n.values, key)
+	foundIndex := -1
+	for i := range n.values {
+		if n.values[i].key == key {
+			foundIndex = i
+			break
+		}
+	}
+	if foundIndex != -1 {
+		n.values[foundIndex] = n.values[len(n.values)-1]
+		n.values = n.values[:len(n.values)-1]
+	}
 	return len(n.values) == 0
 }
 
