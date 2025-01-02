@@ -1,5 +1,6 @@
 # Go SKNN
 A spatial KNN search written in Go.
+![map with markers in a circle](./assets/map.png)
 
 ## Usage
 ```go

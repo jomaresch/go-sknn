@@ -20,6 +20,10 @@ func (v *Value[T]) Key() string {
 	return v.key
 }
 
+func (v *Value[T]) CellID() s2.CellID {
+	return v.cell
+}
+
 func (v *Value[T]) DistanceKM(lat, long float64) float64 {
 	return float64(s2.LatLngFromDegrees(lat, long).Distance(v.cell.LatLng())) * earthRadiusKm
 }
