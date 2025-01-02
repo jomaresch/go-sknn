@@ -1,5 +1,20 @@
 # Go SKNN
-A spatial KNN search written in Go.
+
+## What is Go-SKNN?
+Go-SKNN is a spatial KNN search written in Go.
+It allows to efficiently search for values with increasing distance to a given point.
+Values are first added to the index and can be queried later.
+
+## When should you use Go-SKNN?
+Go-SKNN is useful when you have a large number of values, and you want to find the nearest values to a given point.
+It can solve problems like:
+- Find the nearest restaurants to a given location.
+- Find all gas stations within a 10 km radius to a given location.
+- Find the 10 nearest 4* hotels to a given location.
+
+The image shows an example query. The red dot is the search point, and the blue dots are the returned values.
+The values are sorted by distance to the search point. The index contained 500,000 values. 
+The search query returned the 400 nrarest values for the location 51.0504, 13.7373
 ![map with markers in a circle](./assets/map.png)
 
 ## Usage
