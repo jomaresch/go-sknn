@@ -6,14 +6,18 @@ import (
 	"github.com/golang/geo/s2"
 )
 
+const (
+	maxValuesPerCell = 8
+)
+
 type Node[T any] struct {
-	cellID      s2.CellID
-	values      []*Value[T]
-	children    []*Node[T]
-	isLeaveNode bool
-	parent      *Node[T]
-	childMutex  sync.RWMutex
-	valuesMutex sync.RWMutex
+	cellID        s2.CellID
+	values        []*Value[T]
+	children      []*Node[T]
+	parent        *Node[T]
+	childMutex    sync.RWMutex
+	valuesMutex   sync.RWMutex
+	maxIndexDepth int
 }
 
 func (n *Node[T]) ValuesCount() []int {
@@ -27,10 +31,10 @@ func (n *Node[T]) ValuesCount() []int {
 	return result
 }
 
-func (n *Node[T]) GetOrCreateChild(key s2.CellID, isLeaveNode bool) *Node[T] {
+func (n *Node[T]) GetOrCreateChild(childCellID s2.CellID) *Node[T] {
 	n.childMutex.RLock()
 	for _, child := range n.children {
-		if child.cellID == key {
+		if child.cellID == childCellID {
 			n.childMutex.RUnlock()
 			return child
 		}
@@ -40,19 +44,19 @@ func (n *Node[T]) GetOrCreateChild(key s2.CellID, isLeaveNode bool) *Node[T] {
 	n.childMutex.Lock()
 	defer n.childMutex.Unlock()
 	for _, child := range n.children {
-		if child.cellID == key {
+		if child.cellID == childCellID {
 			return child
 		}
 	}
 
 	child := &Node[T]{
-		cellID:      key,
-		values:      []*Value[T]{},
-		children:    make([]*Node[T], 0, 1),
-		isLeaveNode: isLeaveNode,
-		parent:      n,
-		childMutex:  sync.RWMutex{},
-		valuesMutex: sync.RWMutex{},
+		cellID:        childCellID,
+		values:        []*Value[T]{},
+		children:      make([]*Node[T], 0, 1),
+		parent:        n,
+		childMutex:    sync.RWMutex{},
+		valuesMutex:   sync.RWMutex{},
+		maxIndexDepth: n.maxIndexDepth,
 	}
 	n.children = append(n.children, child)
 	return child
@@ -95,17 +99,56 @@ func (n *Node[T]) FilerValues(callback func(*Value[T]) bool) bool {
 	return false
 }
 
-func (n *Node[T]) SetValue(key string, value T, cell s2.CellID) {
+func (n *Node[T]) AddValue(key string, value T, cell s2.CellID) *Node[T] {
+	valueChildCell := cell.Parent(n.cellID.Level() + 1)
+	n.childMutex.RLock()
+	hasChildren := len(n.children) != 0
+	n.childMutex.RUnlock()
+	// If the node has children, add the value to the child node.
+	if hasChildren {
+		return n.GetOrCreateChild(valueChildCell).AddValue(key, value, cell)
+	}
+
 	n.valuesMutex.Lock()
 	defer n.valuesMutex.Unlock()
-	n.values = append(n.values, &Value[T]{key: key, value: value, cell: cell})
+
+	// If the values in the node don't exceed the maximum, add the value to the node and return
+	if len(n.values)+1 <= maxValuesPerCell {
+		n.values = append(n.values, &Value[T]{key: key, value: value, cell: cell})
+		return n
+	}
+	// If is already at the max depth, add the value to the node and return,
+	// because we can't split a node which is already at max depth.
+	if n.cellID.Level() >= n.maxIndexDepth {
+		n.values = append(n.values, &Value[T]{key: key, value: value, cell: cell})
+		return n
+	}
+	// If the node is not at the max depth, split the node.
+	// Iterate over the values and add them to the children of this node they belong to.
+	for _, v := range n.values {
+		n.GetOrCreateChild(v.cell.Parent(n.cellID.Level()+1)).AddValue(v.key, v.value, cell)
+	}
+	// Remove all values, because they are all added to the children of this node.
+	n.values = nil
+	// Add the new value to the child node.
+	return n.GetOrCreateChild(valueChildCell).AddValue(key, value, cell)
+}
+
+func (n *Node[T]) UpdateValue(key string, value T) {
+	for index := range n.values {
+		if n.values[index].key == key {
+			n.values[index].value = value
+		}
+	}
 }
 
 func (n *Node[T]) IsLeaveNode() bool {
-	return n.isLeaveNode
+	n.childMutex.RLock()
+	defer n.childMutex.RUnlock()
+	return len(n.children) == 0
 }
 
-func (n *Node[T]) RemoveValue(key string) bool {
+func (n *Node[T]) RemoveValue(key string) {
 	n.valuesMutex.Lock()
 	defer n.valuesMutex.Unlock()
 	foundIndex := -1
@@ -119,27 +162,29 @@ func (n *Node[T]) RemoveValue(key string) bool {
 		n.values[foundIndex] = n.values[len(n.values)-1]
 		n.values = n.values[:len(n.values)-1]
 	}
-	return len(n.values) == 0
+}
+
+func (n *Node[T]) Prune() {
+	n.valuesMutex.RLock()
+	defer n.valuesMutex.RUnlock()
+	if len(n.values) != 0 {
+		return
+	}
+	if len(n.children) == 0 {
+		return
+	}
+	n.parent.RemoveChild(n.cellID)
+	n.parent = nil
 }
 
 func (n *Node[T]) RemoveChild(id s2.CellID) {
+	n.childMutex.Lock()
+	defer n.childMutex.Unlock()
+
 	for i, child := range n.children {
 		if child.cellID == id {
 			n.children = append(n.children[:i], n.children[i+1:]...)
 			return
 		}
 	}
-}
-
-func (n *Node[T]) Prune() bool {
-	for _, child := range n.children {
-		if child.isLeaveNode {
-			return len(n.values) == 0
-		}
-		empty := child.Prune()
-		if empty {
-			n.RemoveChild(child.cellID)
-		}
-	}
-	return len(n.children) == 0
 }

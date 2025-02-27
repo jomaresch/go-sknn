@@ -57,19 +57,12 @@ func Test_KNN_AddValue(t *testing.T) {
 	index.AddValue("1", 1, 1, 1)
 	index.AddValue("2", 2, 1.001, 1.001)
 
-	assert.Len(t, index.indexRoot.children, 1)
+	assert.Len(t, index.indexRoot.values, 2)
+	assert.Len(t, index.indexRoot.children, 0)
 	assert.Len(t, index.lookup, 2)
 
-	node := index.indexRoot
-	cellID := s2.CellIDFromLatLng(s2.LatLngFromDegrees(1, 1))
-	for i := range 5 {
-		cell := cellID.Parent(i)
-		node = node.children[0]
-		assert.Equal(t, node.cellID, cell)
-	}
-
-	assert.Equal(t, 1, node.values[0].value)
-	assert.Equal(t, 2, node.values[1].value)
+	assert.Equal(t, 1, index.indexRoot.values[0].value)
+	assert.Equal(t, 2, index.indexRoot.values[1].value)
 }
 
 func Test_KNN_AddValue_Panic(t *testing.T) {
@@ -107,34 +100,17 @@ func Test_KNN_RemoveValue(t *testing.T) {
 	index.AddValue("1", 1, 1, 1)
 	index.AddValue("2", 2, 1.001, 1.001)
 
-	node := index.indexRoot
-	cellID := s2.CellIDFromLatLng(s2.LatLngFromDegrees(1, 1))
-
-	for i := range 5 {
-		cell := cellID.Parent(i)
-		node = node.children[0]
-		assert.Equal(t, node.cellID, cell)
-	}
+	assert.Len(t, index.indexRoot.values, 2)
+	assert.Len(t, index.indexRoot.children, 0)
 
 	index.RemoveValue("1")
-	assert.Len(t, node.values, 1)
-	assert.Equal(t, 2, node.values[0].value)
+	assert.Len(t, index.indexRoot.values, 1)
+	assert.Equal(t, 2, index.indexRoot.values[0].value)
 	assert.Len(t, index.lookup, 1)
 
 	index.RemoveValue("2")
-	assert.Len(t, node.values, 0)
+	assert.Len(t, index.indexRoot.values, 0)
 	assert.Len(t, index.lookup, 0)
-}
-
-func Test_KNN_Prune(t *testing.T) {
-	index, err := NewKNN[int](5)
-	assert.NoError(t, err)
-
-	index.AddValue("1", 1, 1, 1)
-	index.RemoveValue("1")
-
-	index.Prune()
-	assert.Len(t, index.indexRoot.children, 0)
 }
 
 func Test_KNN_SearchApproximate_Partial(t *testing.T) {
